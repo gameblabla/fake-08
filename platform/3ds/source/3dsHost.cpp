@@ -1,4 +1,5 @@
 #include <3ds.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
@@ -9,17 +10,20 @@
 #include <iostream>
 using namespace std;
 
-
 #include "../../../source/host.h"
 #include "../../../source/hostVmShared.h"
 #include "../../../source/nibblehelpers.h"
-#include "../../../source/PicoRam.h"
+#include "../../../source/logger.h"
 
-#define SCREEN_WIDTH 400;
-#define SCREEN_HEIGHT 240;
+// sdl
+#include <SDL/SDL.h>
+//#include <SDL/SDL_gfxBlitFunc.h>
 
-#define SCREEN_2_WIDTH 320;
-#define SCREEN_2_HEIGHT 240;
+#define SCREEN_WIDTH 400
+#define SCREEN_HEIGHT 240
+
+#define SCREEN_2_WIDTH 320
+#define SCREEN_2_HEIGHT 240
 
 #define SAMPLERATE 22050
 #define SAMPLESPERBUF (SAMPLERATE / 30)
@@ -50,6 +54,23 @@ u32 currKHeld;
 Color* _paletteColors;
 Bgr24Col _bgrColors[16];
 Audio* _audio;
+
+//SDL_Window* window;
+SDL_Event event;
+SDL_Surface *window;
+SDL_Surface *texture;
+//SDL_Renderer *renderer;
+//SDL_Texture *texture = NULL;
+SDL_bool done = SDL_FALSE;
+SDL_AudioSpec want, have;
+//SDL_AudioDeviceID dev;
+void *pixels;
+uint8_t *base;
+int pitch;
+
+SDL_Rect SrcR;
+SDL_Rect DestR;
+
 
 uint8_t ConvertInputToP8(u32 input){
 	uint8_t result = 0;
@@ -89,9 +110,19 @@ uint8_t ConvertInputToP8(u32 input){
 }
 
 void postFlipFunction(){
-    gfxFlushBuffers();
-	gfxSwapBuffers();
-	gspWaitForVBlank();
+    // We're done rendering, so we end the frame here.
+
+    //this function doesn't stretch
+    SDL_BlitSurface(texture, NULL, window, &DestR);
+
+    //this function is supposed to stretch, but its doing nothing
+    //int res = SDL_gfxBlitRGBA(texture, NULL, window, NULL);
+
+    //if (res != 1){
+    //    printf("blit failed : %d\n", res);
+    //}
+
+    SDL_UpdateRect(window, 0, 0, 0, 0);
 }
 
 
@@ -180,10 +211,26 @@ Host::Host() { }
 void Host::oneTimeSetup(Color* paletteColors, Audio* audio){
     osSetSpeedupEnable(true);
 
-    _audio = audio;
-    audioSetup();
+    if (SDL_Init(SDL_INIT_VIDEO) != 0)
+    {
+        fprintf(stderr, "SDL could not initialize\n");
+        return;
+    }
 
-    gfxInitDefault();
+    SDL_WM_SetCaption("FAKE-08", NULL);
+
+    int flags = SDL_HWSURFACE;
+
+    window = SDL_SetVideoMode(SCREEN_WIDTH, SCREEN_HEIGHT, 0, flags);
+
+    SDL_Surface* temp = SDL_CreateRGBSurface(flags, PicoScreenWidth, PicoScreenHeight, 0, 0, 0, 0, 0);
+
+    texture = SDL_DisplayFormat(temp);
+
+    SDL_FreeSurface(temp);
+
+    _audio = audio;
+    //audioSetup();
     
     last_time = 0;
     now_time = 0;
@@ -191,19 +238,27 @@ void Host::oneTimeSetup(Color* paletteColors, Audio* audio){
     targetFrameTimeMs = 0;
 
     _paletteColors = paletteColors;
-    for(int i = 0; i < 16; i++){
-        _bgrColors[i] = {
-            _paletteColors[i].Blue,
-            _paletteColors[i].Green,
-            _paletteColors[i].Red
-        };
-    }
+
+    SrcR.x = 0;
+    SrcR.y = 0;
+    SrcR.w = PicoScreenWidth;
+    SrcR.h = PicoScreenHeight;
+
+    DestR.x = 0;
+    DestR.y = 0;
+    DestR.w = SCREEN_WIDTH;
+    DestR.h = SCREEN_HEIGHT;
 }
 
 void Host::oneTimeCleanup(){
     audioCleanup();
 
-	gfxExit();
+    //SDL_DestroyRenderer(renderer);
+    //SDL_DestroyWindow(window);
+
+    SDL_FreeSurface(texture);
+
+    SDL_Quit();
 }
 
 void Host::setTargetFps(int targetFps){
@@ -245,126 +300,38 @@ bool Host::shouldQuit() {
 
 
 void Host::waitForTargetFps(){
-    now_time = svcGetSystemTick();
+    now_time = SDL_GetTicks();
     frame_time = now_time - last_time;
 	last_time = now_time;
 
-	double frameTimeMs = frame_time / CPU_TICKS_PER_MSEC;
 
 	//sleep for remainder of time
-	if (frameTimeMs < targetFrameTimeMs) {
-		double msToSleep = targetFrameTimeMs - frameTimeMs;
+	if (frame_time < targetFrameTimeMs) {
+		uint32_t msToSleep = targetFrameTimeMs - frame_time;
+        
+        SDL_Delay(msToSleep);
 
-		svcSleepThread(msToSleep * 1000 * 1000);
-
-		last_time += CPU_TICKS_PER_MSEC * msToSleep;
+		last_time += msToSleep;
 	}
 }
 
 
 void Host::drawFrame(uint8_t* picoFb, uint8_t* screenPaletteMap){
-    int bgcolor = 0;
-	uint8_t* fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-	//clear whole top framebuffer
-	memset(fb, bgcolor, __3ds_TopScreenWidth*__3ds_TopScreenHeight*3);
+    pixels = texture->pixels;
 
-	//clear bottom buffer in case overflow rendering is being used
-	uint8_t* fbb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
-	memset(fbb, bgcolor, __3ds_BottomScreenWidth*__3ds_BottomScreenHeight*3);
+    for (int y = 0; y < PicoScreenHeight; y ++){
+        for (int x = 0; x < PicoScreenWidth; x ++){
+            uint8_t c = getPixelNibble(x, y, picoFb);
+            Color col = _paletteColors[screenPaletteMap[c]];
 
-    int x, y;
-
-    //these could be combined to shorten this method
-	if (stretch == PixelPerfect) {
-		int xOffset = __3ds_TopScreenWidth / 2 - PicoScreenWidth / 2;
-        int yOffset = __3ds_TopScreenHeight / 2 - PicoScreenHeight / 2;
-
-       for(x = 0; x < 64; x++) {
-            for(y = 0; y < 128; y++) {
-                int x1 = x << 1;
-                int x2 = x1 + 1;
-                uint8_t lc = getPixelNibble(x1, y, picoFb);
-                Bgr24Col lcol = _bgrColors[screenPaletteMap[lc]];
-
-                int pixIdx = (((x1 + xOffset)*__3ds_TopScreenHeight)+ ((__3ds_TopScreenHeight - 1) - (y + yOffset)));
-
-                ((Bgr24Col*)fb)[pixIdx] = lcol;
-
-                uint8_t rc = getPixelNibble(x2, y, picoFb);
-                Bgr24Col rcol = _bgrColors[screenPaletteMap[rc]];
-
-                pixIdx = (((x2 + xOffset)*__3ds_TopScreenHeight)+ ((__3ds_TopScreenHeight - 1) - (y + yOffset)));
-
-                ((Bgr24Col*)fb)[pixIdx] = rcol;
-            }
+            base = ((Uint8 *)pixels) + (4 * ( y * PicoScreenHeight + x));
+            base[0] = col.Alpha;
+            base[1] = col.Blue;
+            base[2] = col.Green;
+            base[3] = col.Red;
         }
-	}
-	else if (stretch == StretchToFit) {
-		double ratio = (double)__3ds_TopScreenHeight / (double)PicoScreenHeight;
-        int stretchedWidth = PicoScreenWidth * ratio;
-
-        int xOffset = __3ds_TopScreenWidth / 2 - stretchedWidth / 2;
-        int yOffset = 0;
-        
-        for(x = 0; x < stretchedWidth; x++) {
-            for(y = 0; y < __3ds_TopScreenHeight; y++) {
-                int picoX = (int)(x / ratio);
-                int picoY = (int)(y / ratio);
-                uint8_t c = getPixelNibble(picoX, picoY, picoFb);
-                Color col = _paletteColors[screenPaletteMap[c]];
-
-                int pixIdx = (((x + xOffset)*__3ds_TopScreenHeight)+ ((__3ds_TopScreenHeight - 1) - (y + yOffset)))*3;
-
-                fb[pixIdx + 0] = col.Blue;
-                fb[pixIdx + 1] = col.Green;
-                fb[pixIdx + 2] = col.Red;
-            }
-        }
-	}
-	else if (stretch == StretchAndOverflow) {
-		//assume landscape, hardcoded double for now (3ds)
-        int ratio = 2;
-        int stretchedWidth = PicoScreenWidth * ratio;
-        int stretchedHeight = PicoScreenHeight * ratio;
-
-        int xOffset = __3ds_TopScreenWidth / 2 - stretchedWidth / 2;
-        int yOffset = 0;
-
-        for(x = 0; x < stretchedWidth; x++) {
-            for(y = 0; y < __3ds_TopScreenHeight; y++) {
-                int picoX = (int)(x / ratio);
-                int picoY = (int)(y / ratio);
-                uint8_t c = getPixelNibble(picoX, picoY, picoFb);
-                Color col = _paletteColors[screenPaletteMap[c]];
-
-                int pixIdx = (((x + xOffset)*__3ds_TopScreenHeight)+ ((__3ds_TopScreenHeight - 1) - (y + yOffset)))*3;
-
-                fb[pixIdx + 0] = col.Blue;
-                fb[pixIdx + 1] = col.Green;
-                fb[pixIdx + 2] = col.Red;
-            }
-        }
-
-        int overflowHeight = stretchedHeight - __3ds_TopScreenHeight;
-
-        xOffset = __3ds_BottomScreenWidth / 2 - stretchedWidth / 2;
-        yOffset = 0;
-
-        for(x = 0; x < stretchedWidth; x++) {
-            for(y = 0; y < overflowHeight; y++) {
-                int picoX = (int)(x / ratio);
-                int picoY = (int)((y + __3ds_TopScreenHeight) / ratio);
-                uint8_t c = getPixelNibble(picoX, picoY, picoFb);
-                Color col = _paletteColors[screenPaletteMap[c]];
-
-                int pixIdx = (((x + xOffset)*__3ds_BottomScreenHeight)+ ((__3ds_BottomScreenHeight - 1) - (y + yOffset)))*3;
-
-                fbb[pixIdx + 0] = col.Blue;
-                fbb[pixIdx + 1] = col.Green;
-                fbb[pixIdx + 2] = col.Red;
-            }
-        }
-	}
+    }
+    
 
     postFlipFunction();
 }
