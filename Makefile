@@ -44,6 +44,9 @@ clean-bittboy:
 	
 clean-funkey:
 	@$(MAKE) -C platform/funkey-s clean
+	
+clean-gcw0:
+	@$(MAKE) -C platform/gcw0 clean
 
 3ds:
 	@$(MAKE) -C platform/3ds
@@ -71,6 +74,9 @@ funkey:
 
 bittboy:
 	@$(MAKE) -C platform/bittboy
+	
+gcw0:
+	@$(MAKE) -C platform/gcw0
 
 clean-tests:
 	@$(MAKE) -C test clean
