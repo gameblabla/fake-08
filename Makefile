@@ -47,6 +47,9 @@ clean-funkey:
 	
 clean-gcw0:
 	@$(MAKE) -C platform/gcw0 clean
+	
+clean-gkd:
+	@$(MAKE) -C platform/gcw0 GKD=1 clean
 
 3ds:
 	@$(MAKE) -C platform/3ds
@@ -77,6 +80,9 @@ bittboy:
 	
 gcw0:
 	@$(MAKE) -C platform/gcw0
+	
+gkd:
+	@$(MAKE) -C platform/gcw0 GKD=1
 
 clean-tests:
 	@$(MAKE) -C test clean
